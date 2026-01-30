@@ -1,0 +1,3 @@
+ccxt
+ta
+python-dotenv  # Para cargar variables de entorno localmente (opcional para tests locales)
