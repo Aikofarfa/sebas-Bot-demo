@@ -8,7 +8,7 @@ import datetime
 from flask import Flask
 import threading
 
-# Flask para UptimeRobot
+# Flask para mantener el bot 24/7 con UptimeRobot
 app = Flask(__name__)
 
 @app.route('/')
@@ -21,88 +21,122 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# Configuración Binance pública
+# Configuración Binance (datos públicos)
 exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {'defaultType': 'spot'},
 })
 
-SYMBOL = 'ETH/USDT'  # Cambiado a Ethereum (ETH/USDT)
-TIMEFRAME = '5m'     # Más rápido
-SHORT_EMA = 9
+SYMBOL = 'ETH/USDT'      # Cambiado a Ethereum
+TIMEFRAME = '5m'         # Rápido
+SHORT_EMA = 7            # Más sensible para más señales
 LONG_EMA = 21
-RSI_PERIOD = 14
-RSI_BUY_LEVEL = 35   # Compra si RSI < 35
-RSI_SELL_LEVEL = 65  # Vende si RSI > 65
-AMOUNT = 0.042       # Ajustado para invertir ~$100 y ganar ~$1 o más por operación (asumiendo 1% gain, ajusta si necesitas más)
-SLEEP_TIME = 15      # Chequea cada 15 segundos
+RSI_PERIOD = 9           # RSI más corto para adaptarse rápido
+RSI_BUY_LEVEL = 38       # Relajado para más entradas
+RSI_SELL_LEVEL = 62      # Relajado para más salidas
+RISK_PERCENT = 0.10      # Riesgo máximo 10% del balance por trade
+SLEEP_TIME = 30          # Chequea cada 30 segundos
+COOLDOWN_AFTER_TRADE = 30  # 30 segundos cooldown
+MAX_POSITION_TIME = 600  # 10 minutos máximo en posición (venta forzada)
+STOP_LOSS_PCT = -0.8     # Cierra si pierde 0.8%
+TAKE_PROFIT_PCT = 1.2    # Cierra si gana 1.2% o más
 
 # Portfolio simulado
 initial_balance = 100.0
 usdt_balance = initial_balance
-btc_balance = 0.0  # Cambiado a eth_balance si prefieres, pero mantengo nombre para compatibilidad
+eth_balance = 0.0
 last_buy_price = 0.0
 total_trades = 0
 total_profit = 0.0
+last_trade_time = 0
 
 def get_price():
-    return exchange.fetch_ticker(SYMBOL)['last']
+    try:
+        return exchange.fetch_ticker(SYMBOL)['last']
+    except Exception as e:
+        print(f"Error precio: {e}", flush=True)
+        return 0.0
 
 def get_account_balance(current_price):
-    eth_value = btc_balance * current_price  # eth_value
+    eth_value = eth_balance * current_price
     total_value = usdt_balance + eth_value
     return {
         'USDT': usdt_balance,
-        'ETH': btc_balance,
+        'ETH': eth_balance,
         'Total_USDT': total_value,
         'Profit_Loss_Total': total_value - initial_balance
     }
 
 def get_historical_data():
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LONG_EMA + RSI_PERIOD + 10)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    return df
+    try:
+        ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LONG_EMA + RSI_PERIOD + 10)
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        return df
+    except Exception as e:
+        print(f"Error datos: {e}", flush=True)
+        return pd.DataFrame()
 
 def calculate_indicators(df):
-    ema_short = EMAIndicator(df['close'], window=SHORT_EMA).ema_indicator()
-    ema_long = EMAIndicator(df['close'], window=LONG_EMA).ema_indicator()
-    rsi = RSIIndicator(df['close'], window=RSI_PERIOD).rsi()
-    return ema_short.iloc[-1], ema_long.iloc[-1], rsi.iloc[-1]
+    if df.empty:
+        return 0.0, 0.0, 50.0
+    ema_short = EMAIndicator(df['close'], window=SHORT_EMA).ema_indicator().iloc[-1]
+    ema_long = EMAIndicator(df['close'], window=LONG_EMA).ema_indicator().iloc[-1]
+    rsi = RSIIndicator(df['close'], window=RSI_PERIOD).rsi().iloc[-1]
+    return ema_short, ema_long, rsi
 
 def simulate_trade(action, price):
-    global usdt_balance, btc_balance, last_buy_price, total_trades, total_profit
+    global usdt_balance, eth_balance, last_buy_price, total_trades, total_profit, last_trade_time
+
+    now = time.time()
+    if now - last_trade_time < COOLDOWN_AFTER_TRADE:
+        print("Cooldown activo...", flush=True)
+        return
+
     profit_loss = 0.0
     cost_revenue = 0.0
 
+    # Calcular cantidad dinámica para apuntar a ~1 USD o más de ganancia
+    target_gain_usd = 1.0  # Mínimo 1 USD por operación
+    target_pct = TAKE_PROFIT_PCT / 100
+    amount = (target_gain_usd / target_pct) / price  # cantidad ETH para ganar ~1 USD al TP
+
     if action == 'buy':
-        cost_revenue = AMOUNT * price
-        if usdt_balance >= cost_revenue:
-            usdt_balance -= cost_revenue
-            btc_balance += AMOUNT
+        cost = amount * price
+        fee = cost * 0.001  # fee 0.1%
+        net_cost = cost + fee
+        if usdt_balance >= net_cost:
+            usdt_balance -= net_cost
+            eth_balance += amount
             last_buy_price = price
             total_trades += 1
-            log_trade('buy', price, AMOUNT, cost_revenue)
+            last_trade_time = now
+            log_trade('buy', price, amount, net_cost)
         else:
-            print(f"Sin fondos para compra: {usdt_balance:.2f} < {cost_revenue:.2f}", flush=True)
-    elif action == 'sell':
-        if btc_balance >= AMOUNT:
-            cost_revenue = AMOUNT * price
-            usdt_balance += cost_revenue
-            btc_balance -= AMOUNT
-            total_trades += 1
-            profit_loss = cost_revenue - (AMOUNT * last_buy_price)
-            total_profit += profit_loss
-            log_trade('sell', price, AMOUNT, cost_revenue, profit_loss)
-        else:
-            print(f"Sin ETH para venta: {btc_balance:.6f}", flush=True)
+            print(f"Sin fondos para compra: {usdt_balance:.2f} < {net_cost:.2f}", flush=True)
 
-def log_trade(action, price, amount, cost_revenue, profit_loss=0.0):
+    elif action == 'sell':
+        if eth_balance >= amount:
+            revenue = amount * price
+            fee = revenue * 0.001
+            net_revenue = revenue - fee
+            profit_loss = net_revenue - (amount * last_buy_price)
+            usdt_balance += net_revenue
+            eth_balance -= amount
+            total_trades += 1
+            total_profit += profit_loss
+            last_trade_time = now
+            log_trade('sell', price, amount, net_revenue, profit_loss)
+        else:
+            print(f"Sin ETH para venta: {eth_balance:.6f} < {amount}", flush=True)
+
+def log_trade(action, price, amount, net_cost_revenue, profit_loss=0.0):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current_total = usdt_balance + eth_balance * price
     message = (
         f"[{now}] {action.upper()} | Precio: {price:.2f} | Cantidad: {amount:.6f} ETH | "
-        f"{'Costo' if action == 'buy' else 'Ingreso'}: {cost_revenue:.2f} USDT | "
-        f"P/L op: {profit_loss:.2f} | USDT: {usdt_balance:.2f} | ETH: {btc_balance:.6f} | "
-        f"Total: {usdt_balance + btc_balance*price:.2f} | P/L total: {usdt_balance + btc_balance*price - initial_balance:.2f}\n"
+        f"{'Costo' if action == 'buy' else 'Ingreso'}: {net_cost_revenue:.2f} USDT | "
+        f"P/L op: {profit_loss:.2f} | USDT: {usdt_balance:.2f} | ETH: {eth_balance:.6f} | "
+        f"Total: {current_total:.2f} | P/L total: {current_total - initial_balance:.2f}\n"
     )
 
     print(message.strip(), flush=True)
@@ -133,7 +167,7 @@ def main():
             if ema_short > ema_long and rsi < RSI_BUY_LEVEL and usdt_balance > 0:
                 print(">>> COMPRA SIMULADA <<<", flush=True)
                 simulate_trade('buy', price)
-            elif ema_short < ema_long and rsi > RSI_SELL_LEVEL and btc_balance > 0:
+            elif ema_short < ema_long and rsi > RSI_SELL_LEVEL and eth_balance > 0:
                 print(">>> VENTA SIMULADA <<<", flush=True)
                 simulate_trade('sell', price)
             else:
@@ -159,6 +193,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
