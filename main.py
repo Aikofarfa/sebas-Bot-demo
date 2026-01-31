@@ -8,7 +8,7 @@ import datetime
 from flask import Flask
 import threading
 
-# Mini servidor Flask para que UptimeRobot mantenga el bot 24/7
+# Mini servidor Flask para mantener el bot vivo con UptimeRobot
 app = Flask(__name__)
 
 @app.route('/')
@@ -22,7 +22,7 @@ def run_flask():
 # Iniciar Flask en hilo separado
 threading.Thread(target=run_flask, daemon=True).start()
 
-# Configuración de Binance (solo datos públicos, sin claves)
+# Configuración de Binance (solo datos públicos)
 exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {
@@ -37,7 +37,7 @@ LONG_PERIOD = 13
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 60
 RSI_OVERSOLD = 40
-AMOUNT = 0.0005  # ¡Cuidado! Esto es MUY grande con balance inicial 100 USDT
+AMOUNT = 0.0005      # ← Ajustado a valor realista (antes 0.05 era imposible con 100 USDT)
 SLEEP_TIME = 30
 
 # Portfolio simulado
@@ -63,7 +63,7 @@ def get_account_balance(current_price):
     }
 
 def get_historical_data():
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LONG_PERIOD + RSI_PERIOD + 10)  # +10 por seguridad
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LONG_PERIOD + RSI_PERIOD + 10)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     return df
 
@@ -87,7 +87,7 @@ def simulate_trade(action, price):
             total_trades += 1
             log_trade('buy', price, AMOUNT, cost_revenue)
         else:
-            print(f"Fondos insuficientes para compra: USDT disponible {usdt_balance:.2f} < {cost_revenue:.2f}")
+            print(f"Fondos insuficientes para compra: {usdt_balance:.2f} < {cost_revenue:.2f}", flush=True)
             return 0.0
 
     elif action == 'sell':
@@ -100,7 +100,7 @@ def simulate_trade(action, price):
             total_profit += profit_loss
             log_trade('sell', price, AMOUNT, cost_revenue, profit_loss)
         else:
-            print(f"No hay suficiente BTC para venta: {btc_balance:.6f} < {AMOUNT}")
+            print(f"No hay suficiente BTC para venta: {btc_balance:.6f} < {AMOUNT}", flush=True)
             return 0.0
 
     return profit_loss
@@ -126,12 +126,14 @@ def log_trade(action, price, amount, cost_revenue, profit_loss=0.0):
 
     print(message.strip(), flush=True)
 
-    # Guardado persistente en el volumen montado en /data
+    # Guardado en volumen persistente
+    log_path = '/data/trades.log'
     try:
-        with open('/data/trades.log', 'a', encoding='utf-8') as f:
+        with open(log_path, 'a', encoding='utf-8') as f:
             f.write(message)
+        print(f"→ Trade guardado en {log_path}", flush=True)
     except Exception as e:
-        print(f"Error al escribir en /data/trades.log: {e}", flush=True)
+        print(f"Error escribiendo en {log_path}: {e}", flush=True)
 
 def main():
     global total_profit
@@ -141,12 +143,11 @@ def main():
             print(f"Precio actual BTC/USDT: {price:.2f}", flush=True)
 
             balance = get_account_balance(price)
-            print(f"Estado simulado → USDT: {balance['USDT']:.2f} | BTC: {balance['BTC']:.6f} | Total: {balance['Total_USDT']:.2f} | P/L total: {balance['Profit_Loss_Total']:.2f}", flush=True)
+            print(f"Estado simulado → USDT: {balance['USDT']:.2f} | BTC: {balance['BTC']:.6f} | Total: {balance['Total_USDT']:.2f} | P/L: {balance['Profit_Loss_Total']:.2f}", flush=True)
 
             df = get_historical_data()
             sma_short, sma_long, rsi = calculate_indicators(df)
 
-            # Debug importante para saber por qué no entra
             print(f"DEBUG → SMA corta: {sma_short:.2f} | SMA larga: {sma_long:.2f} | RSI: {rsi:.2f}", flush=True)
 
             if sma_short > sma_long and rsi < RSI_OVERSOLD and usdt_balance > 0:
@@ -160,27 +161,31 @@ def main():
 
             print(f"Trades totales: {total_trades} | Ganancia acumulada: {total_profit:.2f}", flush=True)
 
-            # Mostrar últimos trades guardados (opcional, pero útil)
+            # Mostrar últimos trades guardados
+            log_path = '/data/trades.log'
             try:
-                with open('/data/trades.log', 'r') as f:
+                with open(log_path, 'r', encoding='utf-8') as f:
                     lines = f.readlines()
                     if lines:
-                        last_3 = ''.join(lines[-3:]).strip()
-                        print(f"Últimos trades:\n{last_3}\n", flush=True)
+                        last_5 = ''.join(lines[-5:]).strip()
+                        print(f"Últimos 5 trades:\n{last_5}\n", flush=True)
                     else:
-                        print("Aún no hay trades en /data/trades.log\n", flush=True)
+                        print(f"{log_path} existe pero está vacío.\n", flush=True)
             except FileNotFoundError:
-                print("Archivo /data/trades.log aún no existe\n", flush=True)
+                print(f"Aún no existe {log_path} (se creará al primer trade)\n", flush=True)
+            except IsADirectoryError:
+                print(f"ERROR: {log_path} es un directorio, no archivo. Revisa configuración del volumen.\n", flush=True)
             except Exception as e:
-                print(f"Error leyendo log: {e}\n", flush=True)
+                print(f"Error leyendo {log_path}: {e}\n", flush=True)
 
         except Exception as e:
             print(f"Error en ciclo principal: {e}", flush=True)
 
-        time.sleep(SLEEP_TIME)
+        time.sleep(60)
 
 if __name__ == "__main__":
     main()
+
 
 
 
