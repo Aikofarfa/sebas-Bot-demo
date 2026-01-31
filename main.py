@@ -2,13 +2,14 @@ import os
 import time
 import ccxt
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
+from ta.trend import EMAIndicator, MACD
+from ta.volatility import BollingerBands, AverageTrueRange
+from ta.volume import VolumeWeightedAveragePrice
 import pandas as pd
 import datetime
 from flask import Flask
 import threading
 
-# Flask para mantener el bot vivo con UptimeRobot
 app = Flask(__name__)
 
 @app.route('/')
@@ -21,7 +22,6 @@ def run_flask():
 
 threading.Thread(target=run_flask, daemon=True).start()
 
-# Configuración de Binance (datos públicos)
 exchange = ccxt.binance({
     'enableRateLimit': True,
     'options': {'defaultType': 'spot'},
@@ -29,177 +29,227 @@ exchange = ccxt.binance({
 
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '5m'
-SHORT_EMA = 9
-LONG_EMA = 21
-RSI_PERIOD = 14
-RSI_BUY_LEVEL = 35
-RSI_SELL_LEVEL = 65
-AMOUNT = 0.0003          # Realista: ~25 USDT con BTC ~84k
-SLEEP_TIME = 60          # Cada 1 minuto - buen equilibrio
+SLEEP_TIME = 60
 
-# Portfolio simulado
+# Parámetros de riesgo
+AMOUNT_PERCENT = 0.05        # 5% del capital por trade
+COOLDOWN_AFTER_TRADE = 120   # segundos
+STOP_LOSS_PCT = -1.0         # -1%
+TAKE_PROFIT_PCT = 1.5        # +1.5%
+BINANCE_FEE = 0.001          # 0.1%
+
+# Portfolio
 initial_balance = 100.0
 usdt_balance = initial_balance
 btc_balance = 0.0
-last_buy_price = 0.0
-total_trades = 0
-total_profit = 0.0
+position_open = False
+entry_price = 0.0
 last_trade_time = 0
-COOLDOWN = 300           # 5 minutos cooldown después de trade
+total_trades = 0
+winning_trades = 0
+losing_trades = 0
+total_profit = 0.0
+max_drawdown = 0.0
+
+# Grid parameters (para Grid Trading)
+GRID_LEVELS = 5
+GRID_RANGE_PCT = 2.0  # 2% rango alrededor del precio actual
 
 def get_price():
-    try:
-        ticker = exchange.fetch_ticker(SYMBOL)
-        return ticker['last']
-    except Exception as e:
-        print(f"Error obteniendo precio: {e}", flush=True)
-        return 0.0
+    return exchange.fetch_ticker(SYMBOL)['last']
 
 def get_account_balance(current_price):
-    try:
-        btc_value = btc_balance * current_price
-        total_value = usdt_balance + btc_value
-        return {
-            'USDT': usdt_balance,
-            'BTC': btc_balance,
-            'Total_USDT': total_value,
-            'Profit_Loss_Total': total_value - initial_balance
-        }
-    except Exception as e:
-        print(f"Error calculando balance: {e}", flush=True)
-        return {
-            'USDT': usdt_balance,
-            'BTC': btc_balance,
-            'Total_USDT': 0.0,
-            'Profit_Loss_Total': 0.0
-        }
+    total_value = usdt_balance + btc_balance * current_price
+    drawdown = (initial_balance - total_value) / initial_balance * 100 if initial_balance > 0 else 0
+    global max_drawdown
+    max_drawdown = max(max_drawdown, drawdown)
+    return {
+        'USDT': usdt_balance,
+        'BTC': btc_balance,
+        'Total': total_value,
+        'P/L': total_value - initial_balance,
+        'Drawdown': drawdown,
+        'Max DD': max_drawdown
+    }
 
-def get_historical_data():
-    try:
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LONG_EMA + RSI_PERIOD + 10)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        return df
-    except Exception as e:
-        print(f"Error obteniendo datos históricos: {e}", flush=True)
-        return pd.DataFrame()
+def get_historical_data(limit=200):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    return df
 
 def calculate_indicators(df):
-    if df.empty:
-        return 0.0, 0.0, 50.0  # Valores neutros por defecto
-    
-    ema_short = EMAIndicator(df['close'], window=SHORT_EMA).ema_indicator().iloc[-1]
-    ema_long = EMAIndicator(df['close'], window=LONG_EMA).ema_indicator().iloc[-1]
-    rsi = RSIIndicator(df['close'], window=RSI_PERIOD).rsi().iloc[-1]
-    
-    return ema_short, ema_long, rsi
+    ema9 = EMAIndicator(df['close'], 9).ema_indicator().iloc[-1]
+    ema21 = EMAIndicator(df['close'], 21).ema_indicator().iloc[-1]
+    rsi = RSIIndicator(df['close'], 14).rsi().iloc[-1]
+    rsi_prev = RSIIndicator(df['close'], 14).rsi().iloc[-2]
+    bb = BollingerBands(df['close'], window=20, window_dev=2)
+    bb_lower = bb.bollinger_lband().iloc[-1]
+    bb_upper = bb.bollinger_hband().iloc[-1]
+    macd = MACD(df['close'])
+    macd_line = macd.macd().iloc[-1]
+    macd_signal = macd.macd_signal().iloc[-1]
+    vwap = VolumeWeightedAveragePrice(high=df['high'], low=df['low'], close=df['close'], volume=df['volume']).volume_weighted_average_price().iloc[-1]
+    atr = AverageTrueRange(df['high'], df['low'], df['close'], window=14).average_true_range().iloc[-1]
+    volume_mean = df['volume'].rolling(20).mean().iloc[-1]
+    return {
+        'ema9': ema9,
+        'ema21': ema21,
+        'rsi': rsi,
+        'rsi_prev': rsi_prev,
+        'bb_lower': bb_lower,
+        'bb_upper': bb_upper,
+        'macd_line': macd_line,
+        'macd_signal': macd_signal,
+        'vwap': vwap,
+        'atr': atr,
+        'volume_mean': volume_mean
+    }
 
-def simulate_trade(action, price):
-    global usdt_balance, btc_balance, last_buy_price, total_trades, total_profit, last_trade_time
-    
+def check_stop_loss_take_profit(current_price):
+    global usdt_balance, btc_balance, position_open, total_profit, winning_trades, losing_trades
+    if not position_open:
+        return False
+
+    pnl_pct = (current_price - entry_price) / entry_price * 100
+
+    if pnl_pct <= STOP_LOSS_PCT or pnl_pct >= TAKE_PROFIT_PCT:
+        revenue = btc_balance * current_price
+        fee = revenue * BINANCE_FEE
+        net_revenue = revenue - fee
+        profit_loss = net_revenue - (btc_balance * entry_price)
+        usdt_balance += net_revenue
+        total_profit += profit_loss
+        total_trades += 1
+        if profit_loss >= 0: winning_trades += 1
+        else: losing_trades += 1
+        log_trade('SELL (SL/TP)', current_price, btc_balance, net_revenue, profit_loss)
+        btc_balance = 0
+        position_open = False
+        return True
+
+    return False
+
+def simulate_buy(price):
+    global usdt_balance, btc_balance, entry_price, last_trade_time, position_open, total_trades
     now = time.time()
-    if now - last_trade_time < COOLDOWN:
-        print("Cooldown activo, esperando...", flush=True)
+    if now - last_trade_time < COOLDOWN_AFTER_TRADE:
         return
 
-    profit_loss = 0.0
-    cost_revenue = 0.0
+    max_usdt = usdt_balance * AMOUNT_PERCENT
+    amount = max_usdt / price
+    cost = amount * price
+    fee = cost * BINANCE_FEE
+    net_cost = cost + fee
 
-    if action == 'buy':
-        cost_revenue = AMOUNT * price
-        if usdt_balance >= cost_revenue:
-            usdt_balance -= cost_revenue
-            btc_balance += AMOUNT
-            last_buy_price = price
-            total_trades += 1
-            last_trade_time = now
-            log_trade('buy', price, AMOUNT, cost_revenue)
-        else:
-            print(f"Sin fondos para compra: {usdt_balance:.2f} < {cost_revenue:.2f}", flush=True)
-    
-    elif action == 'sell':
-        if btc_balance >= AMOUNT:
-            cost_revenue = AMOUNT * price
-            usdt_balance += cost_revenue
-            btc_balance -= AMOUNT
-            total_trades += 1
-            profit_loss = cost_revenue - (AMOUNT * last_buy_price)
-            total_profit += profit_loss
-            last_trade_time = now
-            log_trade('sell', price, AMOUNT, cost_revenue, profit_loss)
-        else:
-            print(f"Sin BTC para venta: {btc_balance:.6f} < {AMOUNT}", flush=True)
+    if net_cost <= usdt_balance:
+        usdt_balance -= net_cost
+        btc_balance += amount
+        entry_price = price
+        total_trades += 1
+        position_open = True
+        last_trade_time = now
+        log_trade('BUY', price, amount, net_cost)
+    else:
+        print("Fondos insuficientes", flush=True)
 
-def log_trade(action, price, amount, cost_revenue, profit_loss=0.0):
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    current_total = usdt_balance + btc_balance * price
+def simulate_sell(price):
+    global usdt_balance, btc_balance, total_profit, winning_trades, losing_trades, position_open, last_trade_time
+    now = time.time()
+    if now - last_trade_time < COOLDOWN_AFTER_TRADE:
+        return
+
+    revenue = btc_balance * price
+    fee = revenue * BINANCE_FEE
+    net_revenue = revenue - fee
+    profit_loss = net_revenue - (btc_balance * entry_price)
+    usdt_balance += net_revenue
+    total_profit += profit_loss
+    total_trades += 1
+    if profit_loss >= 0: winning_trades += 1
+    else: losing_trades += 1
+    log_trade('SELL', price, btc_balance, net_revenue, profit_loss)
+    btc_balance = 0
+    position_open = False
+    last_trade_time = now
+
+def log_trade(action, price, amount, net_cost_revenue, profit_loss=0.0):
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    total_value = usdt_balance + btc_balance * price
     message = (
-        f"[{now}] {action.upper()} | Precio: {price:.2f} | Cantidad: {amount:.6f} BTC | "
-        f"{'Costo' if action == 'buy' else 'Ingreso'}: {cost_revenue:.2f} USDT | "
-        f"P/L operación: {profit_loss:.2f} USDT | "
-        f"USDT: {usdt_balance:.2f} | BTC: {btc_balance:.6f} | "
-        f"Total valor: {current_total:.2f} | P/L acumulado: {current_total - initial_balance:.2f}\n"
+        f"[{now_str}] {action} | Precio: {price:.2f} | Cant: {amount:.6f} | Neto: {net_cost_revenue:.2f} | P/L: {profit_loss:.2f} | "
+        f"USDT: {usdt_balance:.2f} | BTC: {btc_balance:.6f} | Total: {total_value:.2f} | P/L total: {total_value - initial_balance:.2f}\n"
     )
-    
     print(message.strip(), flush=True)
-    
-    log_path = '/data/trades.log'
+
     try:
-        with open(log_path, 'a', encoding='utf-8') as f:
+        with open('/data/trades.log', 'a', encoding='utf-8') as f:
             f.write(message)
-        print(f"Trade guardado en {log_path} ✅", flush=True)
     except Exception as e:
-        print(f"Error al guardar en {log_path}: {e}", flush=True)
+        print(f"Error log: {e}", flush=True)
 
 def main():
     global total_profit
     while True:
         try:
             price = get_price()
-            if price == 0.0:
-                print("No se pudo obtener precio, reintentando...", flush=True)
-                time.sleep(10)
-                continue
-
-            print(f"Precio BTC/USDT: {price:.2f}", flush=True)
+            print(f"Precio: {price:.2f}", flush=True)
 
             balance = get_account_balance(price)
-            print(f"Estado simulado → USDT: {balance['USDT']:.2f} | BTC: {balance['BTC']:.6f} | "
-                  f"Total: {balance['Total_USDT']:.2f} | P/L total: {balance['Profit_Loss_Total']:.2f}", flush=True)
+            print(f"Balance → USDT: {balance['USDT']:.2f} | BTC: {balance['BTC']:.6f} | Total: {balance['Total']:.2f} | P/L: {balance['P/L']:.2f}", flush=True)
 
-            df = get_historical_data()
-            ema_short, ema_long, rsi = calculate_indicators(df)
+            if check_stop_loss_take_profit(price):
+                print("SL/TP ejecutado", flush=True)
 
-            print(f"DEBUG → EMA9: {ema_short:.2f} | EMA21: {ema_long:.2f} | RSI: {rsi:.2f}", flush=True)
+            df = get_historical_data(200)
+            indicators = calculate_indicators(df)
 
-            if ema_short > ema_long and rsi < RSI_BUY_LEVEL and usdt_balance > 0:
-                print(">>> SEÑAL DE COMPRA SIMULADA <<<", flush=True)
-                simulate_trade('buy', price)
-            elif ema_short < ema_long and rsi > RSI_SELL_LEVEL and btc_balance > 0:
-                print(">>> SEÑAL DE VENTA SIMULADA <<<", flush=True)
-                simulate_trade('sell', price)
-            else:
-                print("Sin señal de trade", flush=True)
+            print(f"DEBUG → EMA9: {indicators['ema9']:.2f} | EMA21: {indicators['ema21']:.2f} | RSI: {indicators['rsi']:.2f} | BB lower: {indicators['bb_lower']:.2f}", flush=True)
 
-            print(f"Trades totales: {total_trades} | Ganancia acumulada: {total_profit:.2f}\n", flush=True)
+            buy_signal = False
+            sell_signal = False
 
-            # Mostrar últimos trades guardados
+            # Estrategias combinadas
+            if indicators['ema9'] > indicators['ema21'] and indicators['rsi'] < RSI_BUY_LEVEL:
+                buy_signal = True
+            if indicators['rsi'] < 30 and indicators['rsi'] > indicators['rsi_prev']:
+                buy_signal = True
+            if price < indicators['bb_lower'] and indicators['rsi'] < 40:
+                buy_signal = True
+            if indicators['macd_line'] > indicators['macd_signal'] and indicators['macd_line'] > 0:
+                buy_signal = True
+
+            if indicators['ema9'] < indicators['ema21'] and indicators['rsi'] > RSI_SELL_LEVEL:
+                sell_signal = True
+            if indicators['rsi'] > 70 and indicators['rsi'] < indicators['rsi_prev']:
+                sell_signal = True
+            if price > indicators['bb_upper']:
+                sell_signal = True
+            if indicators['macd_line'] < indicators['macd_signal'] and indicators['macd_line'] < 0:
+                sell_signal = True
+
+            if buy_signal and not position_open:
+                print(">>> COMPRA <<<", flush=True)
+                simulate_buy(price)
+            elif sell_signal and position_open:
+                print(">>> VENTA <<<", flush=True)
+                simulate_sell(price)
+
+            winrate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+            print(f"Trades: {total_trades} | Winrate: {winrate:.1f}% | P/L: {total_profit:.2f}", flush=True)
+
+            # Mostrar últimos trades
             try:
                 with open('/data/trades.log', 'r', encoding='utf-8') as f:
                     lines = f.readlines()
                     if lines:
-                        last_lines = ''.join(lines[-3:])
-                        print(f"Últimos trades:\n{last_lines}", flush=True)
-                    else:
-                        print("Aún no hay trades guardados en /data/trades.log", flush=True)
-            except FileNotFoundError:
-                print("Aún no existe /data/trades.log (se creará en el primer trade)", flush=True)
-            except Exception as e:
-                print(f"Error leyendo log: {e}", flush=True)
+                        print("Últimos:\n" + ''.join(lines[-3:]), flush=True)
+            except:
+                print("Sin trades aún", flush=True)
 
         except Exception as e:
-            print(f"Error en ciclo principal: {e}", flush=True)
+            print(f"Error: {e}", flush=True)
 
         time.sleep(60)
 
 if __name__ == "__main__":
-    main()    
+    main()
