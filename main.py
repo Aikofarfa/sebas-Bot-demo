@@ -16,13 +16,13 @@ exchange = ccxt.binance({
 # NO usamos sandbox para paper trading (todo simulado)
 
 SYMBOL = 'BTC/USDT'
-TIMEFRAME = '1h'  # Intervalo para datos históricos
-SHORT_PERIOD = 12
-LONG_PERIOD = 26
+TIMEFRAME = '15m'  # Intervalo para datos históricos
+SHORT_PERIOD = 20
+LONG_PERIOD = 50
 RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-AMOUNT = 0.001  # Cantidad de BTC por trade (ajusta si quieres)
+RSI_OVERBOUGHT = 75
+RSI_OVERSOLD = 25
+AMOUNT = 0.0005  # Cantidad de BTC por trade (ajusta si quieres)
 
 # Simulación de portfolio
 initial_balance = 100.0  # USDT inicial
@@ -113,8 +113,9 @@ def main():
         except Exception as e:
             print(f"Error: {e}")
 
-        time.sleep(300)  # 5 minutos
+        time.sleep(60)  # 1 minutos
 
 if __name__ == "__main__":
     main()
+
 
