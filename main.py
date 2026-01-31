@@ -33,13 +33,13 @@ exchange = ccxt.binance({
 
 SYMBOL = 'BTC/USDT'
 TIMEFRAME = '15m'  # Cambiado a 15 minutos para señales más rápidas (antes '1h')
-SHORT_PERIOD = 12  # Ajustado para timeframes cortos (antes 12)
-LONG_PERIOD = 26   # Ajustado para timeframes cortos (antes 26)
+SHORT_PERIOD = 9  # Ajustado para timeframes cortos (antes 12)
+LONG_PERIOD = 13   # Ajustado para timeframes cortos (antes 26)
 RSI_PERIOD = 14
-RSI_OVERBOUGHT = 65  # Ajustado para ser más estricto (antes 70)
-RSI_OVERSOLD = 15    # Ajustado para ser más estricto (antes 30)
-AMOUNT = 0.005      # Reducido para trades frecuentes (antes 0.001)
-SLEEP_TIME = 60      # Cada 1 minuto para chequeos más rápidos (antes 300)
+RSI_OVERBOUGHT = 60  # Ajustado para ser más estricto (antes 70)
+RSI_OVERSOLD = 40    # Ajustado para ser más estricto (antes 30)
+AMOUNT = 0.05      # Reducido para trades frecuentes (antes 0.001)
+SLEEP_TIME = 30     # Cada 1 minuto para chequeos más rápidos (antes 300)
 
 # Simulación de portfolio
 initial_balance = 100.0  # USDT inicial
@@ -163,6 +163,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
