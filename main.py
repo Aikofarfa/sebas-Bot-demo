@@ -5,37 +5,33 @@ from ta.momentum import RSIIndicator
 from ta.trend import SMAIndicator
 import pandas as pd
 
-# Configuración del exchange con fix para Spot Testnet 2026
+# Configuración del exchange con fix para Spot Testnet
 exchange = ccxt.binance({
     'apiKey': os.getenv('BINANCE_API_KEY'),
     'secret': os.getenv('BINANCE_API_SECRET'),
     'enableRateLimit': True,
     'options': {
-        'defaultType': 'spot',  # spot para BTC/USDT normal
+        'defaultType': 'spot',
     },
 })
 
-# Forzar URLs del Spot Testnet actualizadas (soluciona Invalid API-key -2015 en peticiones privadas)
+# Forzar URLs del Spot Testnet actualizadas
 exchange.urls['api'] = {
     'public': 'https://testnet.binance.vision/api',
     'private': 'https://testnet.binance.vision/api',
-    'sapi': 'https://testnet.binance.vision/sapi',  # por si se usa en algún endpoint futuro
-    # Si ves errores en ws o streams, puedes agregar:
-    # 'ws': 'wss://testnet.binance.vision/ws',
+    'sapi': 'https://testnet.binance.vision/sapi',
 }
 
-# Activar modo sandbox/demo SOLO después de forzar URLs
 exchange.set_sandbox_mode(True)
 
-# Resto de configuración (no cambies esto por ahora)
 SYMBOL = 'BTC/USDT'
-TIMEFRAME = '1h'  # Intervalo de velas: 1 hora
-SHORT_PERIOD = 12  # Media móvil corta
-LONG_PERIOD = 26  # Media móvil larga
-RSI_PERIOD = 14  # Período RSI
-RSI_OVERBOUGHT = 70  # Vender si RSI > 70
-RSI_OVERSOLD = 30  # Comprar si RSI < 30
-AMOUNT = 0.001  # Cantidad de BTC a operar (ajusta según fondos demo)
+TIMEFRAME = '1h'
+SHORT_PERIOD = 12
+LONG_PERIOD = 26
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+AMOUNT = 0.001  # Ajusta según tus fondos demo
 
 def get_price():
     ticker = exchange.fetch_ticker(SYMBOL)
@@ -44,14 +40,15 @@ def get_price():
 def get_account_balance():
     try:
         balance = exchange.fetch_balance()
-        print("Balance completo (debug):", balance, flush=True)  # ← Para ver todo y debuggear
+        print("Balance completo (debug):", balance, flush=True)
         usdt = balance['USDT']['free'] if 'USDT' in balance else 0
         btc = balance['BTC']['free'] if 'BTC' in balance else 0
         return {'USDT': usdt, 'BTC': btc}
     except Exception as e:
         print(f"Error al obtener balance: {e}", flush=True)
         return {'USDT': 0, 'BTC': 0}
-        def get_historical_data():
+
+def get_historical_data():
     ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LONG_PERIOD + RSI_PERIOD)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     return df
@@ -73,26 +70,18 @@ def execute_trade(action):
     except Exception as e:
         print(f"Error en trade: {e}", flush=True)
 
-# ... (el resto de tus funciones: get_historical_data, calculate_indicators, execute_trade, main() ...)
-
 def main():
     while True:
         try:
-            # Obtener precio actual
             price = get_price()
             print(f"Precio actual de BTC/USDT: {price}", flush=True)
 
-            # Obtener estado de cuenta
             balance = get_account_balance()
             print(f"Estado de la cuenta: USDT: {balance['USDT']}, BTC: {balance['BTC']}", flush=True)
 
-            # Obtener datos históricos
             df = get_historical_data()
-
-            # Calcular indicadores
             sma_short, sma_long, rsi = calculate_indicators(df)
 
-            # Lógica de la estrategia
             if sma_short > sma_long and rsi < RSI_OVERSOLD:
                 print("Señal de COMPRA: MA corta > MA larga y RSI oversold", flush=True)
                 execute_trade('buy')
@@ -103,9 +92,10 @@ def main():
                 print("Sin señal de trade", flush=True)
 
         except Exception as e:
-            print(f"Error: {e}", flush=True)
+            print(f"Error general: {e}", flush=True)
 
-        time.sleep(300)  # Espera 5 minutos
+        time.sleep(300)
 
 if __name__ == "__main__":
     main()
+
