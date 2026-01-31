@@ -364,6 +364,8 @@ def main():
             print(f"Error principal: {e}", flush=True)
 
         time.sleep(60)
+if __name__ == "__main__":
+    main()
 
 
 
