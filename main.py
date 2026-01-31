@@ -27,21 +27,20 @@ exchange = ccxt.binance({
     'options': {'defaultType': 'spot'},
 })
 
-SYMBOL = 'BTC/USDT'  # Cambia a 'ETH/USDT' o 'BNB/USDT' para otra crypto
-
-TIMEFRAME = '5m'
+SYMBOL = 'ETH/USDT'  # Cambiado a Ethereum (ETH/USDT)
+TIMEFRAME = '5m'     # Más rápido
 SHORT_EMA = 9
 LONG_EMA = 21
 RSI_PERIOD = 14
-RSI_BUY_LEVEL = 35
-RSI_SELL_LEVEL = 65
-AMOUNT = 0.0003
-SLEEP_TIME = 15
+RSI_BUY_LEVEL = 35   # Compra si RSI < 35
+RSI_SELL_LEVEL = 65  # Vende si RSI > 65
+AMOUNT = 0.042       # Ajustado para invertir ~$100 y ganar ~$1 o más por operación (asumiendo 1% gain, ajusta si necesitas más)
+SLEEP_TIME = 15      # Chequea cada 15 segundos
 
 # Portfolio simulado
 initial_balance = 100.0
 usdt_balance = initial_balance
-btc_balance = 0.0
+btc_balance = 0.0  # Cambiado a eth_balance si prefieres, pero mantengo nombre para compatibilidad
 last_buy_price = 0.0
 total_trades = 0
 total_profit = 0.0
@@ -50,11 +49,11 @@ def get_price():
     return exchange.fetch_ticker(SYMBOL)['last']
 
 def get_account_balance(current_price):
-    btc_value = btc_balance * current_price
-    total_value = usdt_balance + btc_value
+    eth_value = btc_balance * current_price  # eth_value
+    total_value = usdt_balance + eth_value
     return {
         'USDT': usdt_balance,
-        'BTC': btc_balance,
+        'ETH': btc_balance,
         'Total_USDT': total_value,
         'Profit_Loss_Total': total_value - initial_balance
     }
@@ -70,39 +69,39 @@ def calculate_indicators(df):
     rsi = RSIIndicator(df['close'], window=RSI_PERIOD).rsi()
     return ema_short.iloc[-1], ema_long.iloc[-1], rsi.iloc[-1]
 
-def simulate_trade(action, price, amount=AMOUNT):
+def simulate_trade(action, price):
     global usdt_balance, btc_balance, last_buy_price, total_trades, total_profit
     profit_loss = 0.0
     cost_revenue = 0.0
 
     if action == 'buy':
-        cost_revenue = amount * price
+        cost_revenue = AMOUNT * price
         if usdt_balance >= cost_revenue:
             usdt_balance -= cost_revenue
-            btc_balance += amount
+            btc_balance += AMOUNT
             last_buy_price = price
             total_trades += 1
-            log_trade('buy', price, amount, cost_revenue)
+            log_trade('buy', price, AMOUNT, cost_revenue)
         else:
             print(f"Sin fondos para compra: {usdt_balance:.2f} < {cost_revenue:.2f}", flush=True)
     elif action == 'sell':
-        if btc_balance >= amount:
-            cost_revenue = amount * price
+        if btc_balance >= AMOUNT:
+            cost_revenue = AMOUNT * price
             usdt_balance += cost_revenue
-            btc_balance -= amount
+            btc_balance -= AMOUNT
             total_trades += 1
-            profit_loss = cost_revenue - (amount * last_buy_price)
+            profit_loss = cost_revenue - (AMOUNT * last_buy_price)
             total_profit += profit_loss
-            log_trade('sell', price, amount, cost_revenue, profit_loss)
+            log_trade('sell', price, AMOUNT, cost_revenue, profit_loss)
         else:
-            print(f"Sin BTC para venta: {btc_balance:.6f}", flush=True)
+            print(f"Sin ETH para venta: {btc_balance:.6f}", flush=True)
 
 def log_trade(action, price, amount, cost_revenue, profit_loss=0.0):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     message = (
-        f"[{now}] {action.upper()} | Precio: {price:.2f} | Cantidad: {amount:.6f} BTC | "
+        f"[{now}] {action.upper()} | Precio: {price:.2f} | Cantidad: {amount:.6f} ETH | "
         f"{'Costo' if action == 'buy' else 'Ingreso'}: {cost_revenue:.2f} USDT | "
-        f"P/L op: {profit_loss:.2f} | USDT: {usdt_balance:.2f} | BTC: {btc_balance:.6f} | "
+        f"P/L op: {profit_loss:.2f} | USDT: {usdt_balance:.2f} | ETH: {btc_balance:.6f} | "
         f"Total: {usdt_balance + btc_balance*price:.2f} | P/L total: {usdt_balance + btc_balance*price - initial_balance:.2f}\n"
     )
 
@@ -118,23 +117,13 @@ def log_trade(action, price, amount, cost_revenue, profit_loss=0.0):
 
 def main():
     global total_profit
-    # PRUEBA TEMPORAL: Forzar una compra y venta de prueba al iniciar
-    price = get_price()
-    if price > 0.0:
-        print("Iniciando prueba de compra/venta...", flush=True)
-        simulate_trade('buy', price, amount=0.0001)  # Compra pequeña de prueba
-        time.sleep(60)  # Espera 60 seg
-        simulate_trade('sell', price, amount=0.0001)  # Venta de prueba
-        print("Prueba completada. Quita esta sección para modo normal.", flush=True)
-    # FIN PRUEBA TEMPORAL
-
     while True:
         try:
             price = get_price()
-            print(f"Precio BTC/USDT: {price:.2f}", flush=True)
+            print(f"Precio ETH/USDT: {price:.2f}", flush=True)
 
             balance = get_account_balance(price)
-            print(f"Balance: USDT {balance['USDT']:.2f} | BTC {balance['BTC']:.6f} | Total {balance['Total_USDT']:.2f} | P/L {balance['Profit_Loss_Total']:.2f}", flush=True)
+            print(f"Balance: USDT {balance['USDT']:.2f} | ETH {balance['ETH']:.6f} | Total {balance['Total_USDT']:.2f} | P/L {balance['Profit_Loss_Total']:.2f}", flush=True)
 
             df = get_historical_data()
             ema_short, ema_long, rsi = calculate_indicators(df)
@@ -170,6 +159,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
