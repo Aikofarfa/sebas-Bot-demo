@@ -1,14 +1,12 @@
-import os
+ import os
 import time
 import ccxt
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
 import pandas as pd
 import datetime
 from flask import Flask
 import threading
 
-# Flask para UptimeRobot
+# Flask para mantener el bot 24/7 con UptimeRobot
 app = Flask(__name__)
 
 @app.route('/')
@@ -27,28 +25,61 @@ exchange = ccxt.binance({
     'options': {'defaultType': 'spot'},
 })
 
-SYMBOL = 'BTC/JPY'           # Cambiado a BTC/JPY para mayor ganancia
-TIMEFRAME = '5m'             # Rápido
-SHORT_EMA = 7                # Más sensible
-LONG_EMA = 21
-RSI_PERIOD = 9               # RSI más corto para adaptarse rápido
-RSI_BUY_LEVEL = 40           # Compra si RSI < 40 (más entradas)
-RSI_SELL_LEVEL = 60          # Vende si RSI > 60 (más salidas)
-RISK_PERCENT = 0.10          # Riesgo máximo 10% del balance por trade
-SLEEP_TIME = 30              # Chequea cada 30 segundos
-COOLDOWN_AFTER_TRADE = 30    # 30 segundos cooldown
-MAX_POSITION_TIME = 600      # 10 minutos máximo en posición (venta forzada)
-STOP_LOSS_PCT = -0.8         # Cierra si pierde 0.8%
-TAKE_PROFIT_PCT = 1.5        # Cierra si gana 1.5% o más
+SYMBOL = 'BTC/JPY'  # Par ajustado
+SLEEP_TIME = 30     # Chequea cada 30 segundos
+
+# Grid parameters (ajustados al precio actual de BTC/JPY ~11.5M JPY)
+GRID_LOWER = 11200000.0   # Precio inferior del rango (JPY)
+GRID_UPPER = 12000000.0   # Precio superior del rango (JPY)
+NUM_GRIDS = 107           # Cantidad de grids (como en tu captura)
+GRID_MODE = 'arithmetic'  # Modo aritmético
+TRAILING_UP = True        # Trailing ascending (ajusta rango si precio sube)
+GRID_INVEST_PCT = 0.05    # 5% del balance disponible para todo el grid
+
+# Risk management
+RISK_PER_TRADE = 0.10     # 10% max por trade individual
+STOP_LOSS_PCT = -1.2      # -1.2% desde precio de entrada
+TAKE_PROFIT_PCT = 1.5     # +1.5% desde precio de entrada
+BINANCE_FEE = 0.001       # 0.1% fee por lado
+COOLDOWN_AFTER_TRADE = 60 # 1 min cooldown
 
 # Portfolio simulado
 initial_balance = 100.0
 usdt_balance = initial_balance
 btc_balance = 0.0
-last_buy_price = 0.0
-total_trades = 0
-total_profit = 0.0
+position_open = False
+entry_price = 0.0
 last_trade_time = 0
+total_trades = 0
+winning_trades = 0
+losing_trades = 0
+total_profit = 0.0
+max_drawdown = 0.0
+
+# Grid state
+grid_levels = []
+grid_orders = {}  # {level: {'type': 'buy/sell', 'amount': amt, 'executed': False}}
+
+def initialize_grid():
+    global grid_levels, grid_orders
+    grid_levels = []
+    step = (GRID_UPPER - GRID_LOWER) / NUM_GRIDS
+    current = GRID_LOWER
+    while current <= GRID_UPPER:
+        grid_levels.append(round(current, 2))
+        current += step
+
+    grid_orders = {}
+    for level in grid_levels:
+        grid_orders[level] = {'type': 'buy' if level < get_price() else 'sell', 'amount': 0.0, 'executed': False}
+
+def adjust_trailing_up(price):
+    global GRID_LOWER, GRID_UPPER, grid_levels
+    if TRAILING_UP and price > GRID_UPPER * 1.01:  # Si sube 1% por encima del upper
+        shift = price - GRID_UPPER
+        GRID_LOWER += shift
+        GRID_UPPER += shift
+        initialize_grid()  # Reconstruir rejilla
 
 def get_price():
     try:
@@ -58,122 +89,89 @@ def get_price():
         return 0.0
 
 def get_account_balance(current_price):
-    btc_value = btc_balance * current_price
-    total_value = usdt_balance + btc_value
+    total_value = usdt_balance + btc_balance * current_price
+    drawdown = (initial_balance - total_value) / initial_balance * 100 if initial_balance > 0 else 0
+    global max_drawdown
+    max_drawdown = max(max_drawdown, drawdown)
     return {
         'USDT': usdt_balance,
         'BTC': btc_balance,
-        'Total_USDT': total_value,
-        'Profit_Loss_Total': total_value - initial_balance
+        'Total': total_value,
+        'P/L': total_value - initial_balance,
+        'Drawdown': drawdown,
+        'Max DD': max_drawdown
     }
 
-def get_historical_data():
-    try:
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=LONG_EMA + RSI_PERIOD + 10)
-        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        return df
-    except Exception as e:
-        print(f"Error datos: {e}", flush=True)
-        return pd.DataFrame()
+def simulate_grid_trade(price):
+    global usdt_balance, btc_balance, total_trades, total_profit, last_trade_time
+    adjust_trailing_up(price)
 
-def calculate_indicators(df):
-    if df.empty:
-        return 0.0, 0.0, 50.0
-    ema_short = EMAIndicator(df['close'], window=SHORT_EMA).ema_indicator().iloc[-1]
-    ema_long = EMAIndicator(df['close'], window=LONG_EMA).ema_indicator().iloc[-1]
-    rsi = RSIIndicator(df['close'], window=RSI_PERIOD).rsi().iloc[-1]
-    return ema_short, ema_long, rsi
+    for level in grid_levels:
+        order = grid_orders.get(level, None)
+        if not order or order['executed']:
+            continue
 
-def simulate_trade(action, price):
-    global usdt_balance, btc_balance, last_buy_price, total_trades, total_profit, last_trade_time
+        if order['type'] == 'buy' and price <= level:
+            amount = (usdt_balance * RISK_PER_TRADE) / level
+            cost = amount * level
+            fee = cost * BINANCE_FEE
+            net_cost = cost + fee
+            if net_cost <= usdt_balance:
+                usdt_balance -= net_cost
+                btc_balance += amount
+                order['executed'] = True
+                order['amount'] = amount
+                total_trades += 1
+                last_trade_time = time.time()
+                log_trade('BUY GRID', level, amount, net_cost)
 
-    now = time.time()
-    if now - last_trade_time < COOLDOWN_AFTER_TRADE:
-        print("Cooldown activo...", flush=True)
-        return
-
-    # Calcular cantidad para apuntar a ~1 USD o más de ganancia
-    target_gain_usd = 1.0  # Mínimo 1 USD por operación
-    target_pct = TAKE_PROFIT_PCT / 100
-    amount = (target_gain_usd / target_pct) / price  # cantidad BTC para ganar ~1 USD al TP
-
-    profit_loss = 0.0
-    cost_revenue = 0.0
-
-    if action == 'buy':
-        cost = amount * price
-        fee = cost * 0.001
-        net_cost = cost + fee
-        if usdt_balance >= net_cost:
-            usdt_balance -= net_cost
-            btc_balance += amount
-            last_buy_price = price
-            total_trades += 1
-            last_trade_time = now
-            log_trade('buy', price, amount, net_cost)
-        else:
-            print(f"Sin fondos para compra: {usdt_balance:.2f} < {net_cost:.2f}", flush=True)
-
-    elif action == 'sell':
-        if btc_balance >= amount:
-            revenue = amount * price
-            fee = revenue * 0.001
-            net_revenue = revenue - fee
-            profit_loss = net_revenue - (amount * last_buy_price)
-            usdt_balance += net_revenue
-            btc_balance -= amount
-            total_trades += 1
-            total_profit += profit_loss
-            last_trade_time = now
-            log_trade('sell', price, amount, net_revenue, profit_loss)
-        else:
-            print(f"Sin BTC para venta: {btc_balance:.6f} < {amount}", flush=True)
+        elif order['type'] == 'sell' and price >= level:
+            amount = order['amount']
+            if btc_balance >= amount:
+                revenue = amount * level
+                fee = revenue * BINANCE_FEE
+                net_revenue = revenue - fee
+                profit_loss = net_revenue - (amount * level)
+                usdt_balance += net_revenue
+                btc_balance -= amount
+                total_trades += 1
+                total_profit += profit_loss
+                order['executed'] = True
+                last_trade_time = time.time()
+                log_trade('SELL GRID', level, amount, net_revenue, profit_loss)
 
 def log_trade(action, price, amount, net_cost_revenue, profit_loss=0.0):
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    current_total = usdt_balance + btc_balance * price
+    total_value = usdt_balance + btc_balance * price
     message = (
-        f"[{now}] {action.upper()} | Precio: {price:.2f} | Cantidad: {amount:.6f} BTC | "
-        f"{'Costo' if action == 'buy' else 'Ingreso'}: {net_cost_revenue:.2f} USDT | "
+        f"[{now}] {action} | Precio: {price:.2f} | Cant: {amount:.6f} | Neto: {net_cost_revenue:.2f} | "
         f"P/L op: {profit_loss:.2f} | USDT: {usdt_balance:.2f} | BTC: {btc_balance:.6f} | "
-        f"Total: {current_total:.2f} | P/L total: {current_total - initial_balance:.2f}\n"
+        f"Total: {total_value:.2f} | P/L total: {total_value - initial_balance:.2f}\n"
     )
-
     print(message.strip(), flush=True)
 
     log_path = '/data/trades.log'
     try:
         with open(log_path, 'a', encoding='utf-8') as f:
             f.write(message)
-        print(f"Guardado en {log_path}", flush=True)
+        print(f"Guardado en {log_path} ✅", flush=True)
     except Exception as e:
-        print(f"Error guardando: {e}", flush=True)
+        print(f"Error log: {e}", flush=True)
 
 def main():
     global total_profit
+    initialize_grid()  # Crea la rejilla al iniciar
     while True:
         try:
             price = get_price()
             print(f"Precio BTC/JPY: {price:.2f}", flush=True)
 
             balance = get_account_balance(price)
-            print(f"Balance: USDT {balance['USDT']:.2f} | BTC {balance['BTC']:.6f} | Total {balance['Total_USDT']:.2f} | P/L {balance['Profit_Loss_Total']:.2f}", flush=True)
+            print(f"Balance → USDT: {balance['USDT']:.2f} | BTC: {balance['BTC']:.6f} | Total: {balance['Total']:.2f} | P/L: {balance['P/L']:.2f}", flush=True)
 
-            df = get_historical_data()
-            ema_short, ema_long, rsi = calculate_indicators(df)
+            simulate_grid_trade(price)
 
-            print(f"DEBUG → EMA9: {ema_short:.2f} | EMA21: {ema_long:.2f} | RSI: {rsi:.2f}", flush=True)
-
-            if ema_short > ema_long and rsi < RSI_BUY_LEVEL and usdt_balance > 0:
-                print(">>> COMPRA SIMULADA <<<", flush=True)
-                simulate_trade('buy', price)
-            elif ema_short < ema_long and rsi > RSI_SELL_LEVEL and btc_balance > 0:
-                print(">>> VENTA SIMULADA <<<", flush=True)
-                simulate_trade('sell', price)
-            else:
-                print("Sin señal", flush=True)
-
-            print(f"Trades: {total_trades} | Ganancia acumulada: {total_profit:.2f}\n", flush=True)
+            print(f"Trades totales: {total_trades} | Ganancia acumulada: {total_profit:.2f}\n", flush=True)
 
             # Mostrar últimos trades
             try:
@@ -181,20 +179,20 @@ def main():
                     lines = f.readlines()
                     if lines:
                         print("Últimos trades:\n" + ''.join(lines[-3:]), flush=True)
+                    else:
+                        print("Aún no hay trades en /data/trades.log", flush=True)
             except FileNotFoundError:
-                print("Aún sin trades en /data/trades.log\n", flush=True)
+                print("Aún no existe /data/trades.log (se creará en el primer trade)", flush=True)
             except Exception as e:
-                print(f"Error leyendo log: {e}\n", flush=True)
+                print(f"Error leyendo log: {e}", flush=True)
 
         except Exception as e:
-            print(f"Error: {e}", flush=True)
+            print(f"Error principal: {e}", flush=True)
 
-        time.sleep(15)
+        time.sleep(30)
 
 if __name__ == "__main__":
-    main()
-
-
+    main()           
 
 
 
