@@ -1,4 +1,4 @@
- import os
+import os
 import time
 import ccxt
 import pandas as pd
@@ -193,6 +193,7 @@ def main():
 
 if __name__ == "__main__":
     main()           
+
 
 
 
